@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Subtitle Foundry</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Instrument+Serif:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <div class="page-noise"></div>
+    <div class="site-shell">
+      <header class="hero">
+        <div class="hero-copy reveal">
+          <p class="eyebrow">Subtitle extraction, preview, translation, export</p>
+          <h1>Turn a YouTube link into clean, downloadable subtitles.</h1>
+          <p class="hero-text">
+            Inspect every available caption track, compare manual and auto-generated subtitles,
+            preview the transcript with timestamps, translate supported tracks, and export in the
+            format your workflow needs.
+          </p>
+          <div class="hero-badges">
+            <span>SRT</span>
+            <span>TXT</span>
+            <span>CSV</span>
+            <span>VTT</span>
+            <span>JSON</span>
+          </div>
+        </div>
+        <aside class="hero-side reveal delay-1">
+          <div class="metric-card">
+            <span class="metric-label">Ideal for</span>
+            <strong>Editors, researchers, repurposing teams</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Track coverage</span>
+            <strong>Manual captions and auto-generated subtitles</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Preview mode</span>
+            <strong>Timestamp table plus clean reading view</strong>
+          </div>
+        </aside>
+      </header>
+
+      <main class="workspace">
+        <section class="panel command-panel reveal delay-2">
+          <div class="panel-head">
+            <div>
+              <p class="section-label">Step 1</p>
+              <h2>Analyze a video</h2>
+            </div>
+            <p id="status" class="status idle">Paste a YouTube link to load subtitle availability.</p>
+          </div>
+          <form id="analyze-form" class="analyze-form">
+            <input
+              id="video-url"
+              name="url"
+              type="url"
+              placeholder="https://www.youtube.com/watch?v=..."
+              required
+            />
+            <button type="submit" id="analyze-button">Analyze video</button>
+          </form>
+        </section>
+
+        <section class="dashboard hidden" id="dashboard">
+          <section class="panel video-panel reveal">
+            <div class="video-summary">
+              <img id="video-thumbnail" alt="Video thumbnail" />
+              <div class="video-copy">
+                <p class="section-label">Video</p>
+                <h2 id="video-title"></h2>
+                <p id="video-author" class="muted"></p>
+                <div class="video-stats">
+                  <span id="video-length"></span>
+                  <span id="track-summary"></span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="dashboard-grid">
+            <section class="panel inventory-panel reveal delay-1">
+              <div class="panel-head inventory-head">
+                <div>
+                  <p class="section-label">Step 2</p>
+                  <h2>Choose a track</h2>
+                </div>
+                <input id="track-search" type="search" placeholder="Filter languages or type..." />
+              </div>
+              <div class="track-toolbar">
+                <button class="chip active" data-filter="all" type="button">All tracks</button>
+                <button class="chip" data-filter="manual" type="button">Manual only</button>
+                <button class="chip" data-filter="auto" type="button">Auto only</button>
+                <button class="chip" data-filter="translatable" type="button">Translatable</button>
+              </div>
+              <div id="track-list" class="track-list"></div>
+            </section>
+
+            <section class="panel controls-panel reveal delay-2">
+              <div class="panel-head">
+                <div>
+                  <p class="section-label">Step 3</p>
+                  <h2>Preview and export</h2>
+                </div>
+              </div>
+              <div class="controls-stack">
+                <label>
+                  Selected subtitle track
+                  <select id="track-select"></select>
+                </label>
+                <label>
+                  Output language
+                  <select id="language-select"></select>
+                </label>
+                <label>
+                  Download format
+                  <select id="format-select">
+                    <option value="srt">SRT</option>
+                    <option value="txt">TXT</option>
+                    <option value="csv">CSV</option>
+                    <option value="vtt">VTT</option>
+                    <option value="json">JSON</option>
+                  </select>
+                </label>
+              </div>
+              <div class="preset-row">
+                <button class="preset" data-format="srt" type="button">Editor preset</button>
+                <button class="preset" data-format="csv" type="button">Spreadsheet preset</button>
+                <button class="preset" data-format="txt" type="button">Reading preset</button>
+              </div>
+              <div class="action-row">
+                <button id="preview-button" class="secondary" type="button">Refresh preview</button>
+                <button id="download-button" type="button">Download file</button>
+              </div>
+              <p class="helper">
+                Translation options appear only when the chosen YouTube track supports them.
+              </p>
+            </section>
+          </section>
+
+          <section class="panel preview-panel reveal delay-2">
+            <div class="panel-head">
+              <div>
+                <p class="section-label">Step 4</p>
+                <h2 id="preview-title">Transcript preview</h2>
+              </div>
+              <div class="tab-row">
+                <button class="tab active" data-view="table" type="button">Timestamp view</button>
+                <button class="tab" data-view="reading" type="button">Reading view</button>
+              </div>
+            </div>
+
+            <div class="preview-surface" id="table-view">
+              <div class="preview-table-head">
+                <span>#</span>
+                <span>Start</span>
+                <span>End</span>
+                <span>Text</span>
+              </div>
+              <div id="preview-table" class="preview-table"></div>
+            </div>
+
+            <div class="preview-surface hidden" id="reading-view">
+              <pre id="preview-content" class="preview-content"></pre>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </body>
+</html>
