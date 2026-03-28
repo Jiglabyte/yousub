@@ -9,6 +9,7 @@ const state = {
 const form = document.querySelector("#analyze-form");
 const analyzeButton = document.querySelector("#analyze-button");
 const statusEl = document.querySelector("#status");
+const noticeEl = document.querySelector("#notice");
 const dashboard = document.querySelector("#dashboard");
 const thumbnailEl = document.querySelector("#video-thumbnail");
 const titleEl = document.querySelector("#video-title");
@@ -34,6 +35,28 @@ const readingView = document.querySelector("#reading-view");
 function setStatus(message, tone = "idle") {
   statusEl.textContent = message;
   statusEl.className = `status ${tone}`;
+}
+
+function setNotice(message = "", tone = "info") {
+  if (!message) {
+    noticeEl.textContent = "";
+    noticeEl.className = "notice hidden";
+    return;
+  }
+  noticeEl.textContent = message;
+  noticeEl.className = `notice ${tone}`;
+}
+
+function friendlyErrorMessage(message) {
+  const normalized = String(message || "");
+  if (
+    normalized.includes("rate-limiting") ||
+    normalized.includes("HTTP 429") ||
+    normalized.includes("blocked transcript requests")
+  ) {
+    return "YouTube is rate-limiting this hosted server right now. Try again in a minute, test another video, or use the app from a different network.";
+  }
+  return normalized;
 }
 
 function secondsToDuration(seconds) {
@@ -237,6 +260,7 @@ function renderAnalysis(analysis) {
   fillLanguageSelect();
   renderTracks();
   dashboard.classList.remove("hidden");
+  setNotice(analysis.metadata_notice || "", "info");
   previewTitle.textContent = "Transcript preview";
   previewTable.innerHTML = `<div class="empty-state">Choose a track and refresh the preview.</div>`;
   previewContent.textContent = "Choose a track and refresh the preview.";
@@ -252,6 +276,7 @@ async function analyzeVideo(event) {
   }
 
   analyzeButton.disabled = true;
+  setNotice("");
   setStatus("Inspecting YouTube subtitle tracks...", "idle");
 
   try {
@@ -267,7 +292,8 @@ async function analyzeVideo(event) {
     renderAnalysis(payload.data);
     setStatus("Tracks loaded. Pick a subtitle source and preview it.", "success");
   } catch (error) {
-    setStatus(error.message, "error");
+    setNotice(friendlyErrorMessage(error.message), "warning");
+    setStatus(friendlyErrorMessage(error.message), "error");
   } finally {
     analyzeButton.disabled = false;
   }
@@ -281,6 +307,7 @@ async function previewCaptions() {
   }
 
   previewButton.disabled = true;
+  setNotice("");
   setStatus("Loading subtitle preview...", "idle");
 
   try {
@@ -295,7 +322,8 @@ async function previewCaptions() {
     renderPreview(payload.data.rows, payload.data.plain_text);
     setStatus("Preview updated.", "success");
   } catch (error) {
-    setStatus(error.message, "error");
+    setNotice(friendlyErrorMessage(error.message), "warning");
+    setStatus(friendlyErrorMessage(error.message), "error");
   } finally {
     previewButton.disabled = false;
   }

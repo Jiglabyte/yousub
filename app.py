@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -10,10 +11,12 @@ import warnings
 from dataclasses import dataclass
 from html import unescape
 from typing import Any
+from xml.etree import ElementTree
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
 from flask import Flask, Response, jsonify, render_template, request
+import requests
 from youtube_transcript_api import (
     IpBlocked,
     NoTranscriptFound,
@@ -28,6 +31,13 @@ from youtube_transcript_api import (
 )
 
 YOUTUBE_WATCH_URL = "https://www.youtube.com/watch"
+ANALYSIS_CACHE_TTL = 60 * 15
+SEGMENT_CACHE_TTL = 60 * 30
+FETCH_RETRIES = 3
+RATE_LIMIT_MESSAGE = (
+    "YouTube is rate-limiting this server right now. Please try again in a minute, "
+    "try a different video, or use the app from a different network."
+)
 WATCH_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -52,8 +62,34 @@ class CaptionSegment:
         return self.start + self.duration
 
 
+@dataclass
+class CacheEntry:
+    expires_at: float
+    value: Any
+
+
+ANALYSIS_CACHE: dict[str, CacheEntry] = {}
+SEGMENT_CACHE: dict[tuple[str, str, str], CacheEntry] = {}
+TRACK_URL_CACHE: dict[tuple[str, str], CacheEntry] = {}
+
+
 def transcript_api() -> YouTubeTranscriptApi:
     return YouTubeTranscriptApi()
+
+
+def cache_get(store: dict[Any, CacheEntry], key: Any) -> Any | None:
+    entry = store.get(key)
+    if not entry:
+        return None
+    if entry.expires_at <= time.time():
+        store.pop(key, None)
+        return None
+    return entry.value
+
+
+def cache_set(store: dict[Any, CacheEntry], key: Any, value: Any, ttl_seconds: int) -> Any:
+    store[key] = CacheEntry(expires_at=time.time() + ttl_seconds, value=value)
+    return value
 
 
 def extract_video_id(raw: str) -> str:
@@ -85,13 +121,26 @@ def extract_video_id(raw: str) -> str:
 
 def fetch_text(url: str, headers: dict[str, str] | None = None) -> str:
     req = urllib.request.Request(url, headers=headers or WATCH_HEADERS)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as response:
-            return response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        raise SubtitleError(f"YouTube returned HTTP {exc.code}.") from exc
-    except urllib.error.URLError as exc:
-        raise SubtitleError("Could not reach YouTube.") from exc
+    last_error: Exception | None = None
+    for attempt in range(FETCH_RETRIES):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as response:
+                return response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code == 429:
+                if attempt < FETCH_RETRIES - 1:
+                    time.sleep(1.25 * (attempt + 1))
+                    continue
+                raise SubtitleError(RATE_LIMIT_MESSAGE) from exc
+            raise SubtitleError(f"YouTube returned HTTP {exc.code}.") from exc
+        except urllib.error.URLError as exc:
+            last_error = exc
+            if attempt < FETCH_RETRIES - 1:
+                time.sleep(0.75 * (attempt + 1))
+                continue
+            raise SubtitleError("Could not reach YouTube.") from exc
+    raise SubtitleError("Could not reach YouTube.") from last_error
 
 
 def extract_player_response(html: str) -> dict[str, Any]:
@@ -104,6 +153,14 @@ def extract_player_response(html: str) -> dict[str, Any]:
         if match:
             return json.loads(match.group(1))
     raise SubtitleError("Could not read the video metadata from YouTube.")
+
+
+def fallback_video_details(video_id: str) -> dict[str, Any]:
+    return {
+        "title": f"YouTube Video ({video_id})",
+        "author": "Unknown channel",
+        "lengthSeconds": "0",
+    }
 
 
 def build_track_id(language_code: str, is_generated: bool) -> str:
@@ -195,10 +252,48 @@ def build_document(segments: list[CaptionSegment], file_format: str) -> tuple[st
     raise SubtitleError("Unsupported output format.")
 
 
+def store_track_url(video_id: str, track_id: str, transcript_url: str) -> None:
+    cache_set(TRACK_URL_CACHE, (video_id, track_id), transcript_url, SEGMENT_CACHE_TTL)
+
+
+def fetch_segments_from_cached_url(transcript_url: str, target_language: str | None) -> list[CaptionSegment]:
+    url = transcript_url if not target_language else f"{transcript_url}&tlang={urllib.parse.quote(target_language)}"
+    response = requests.get(url, timeout=20)
+    if response.status_code == 429:
+        raise SubtitleError(RATE_LIMIT_MESSAGE)
+    if response.status_code >= 400:
+        raise SubtitleError(f"YouTube returned HTTP {response.status_code}.")
+
+    try:
+        root = ElementTree.fromstring(response.text)
+    except ElementTree.ParseError as exc:
+        raise SubtitleError("Could not parse subtitle data returned by YouTube.") from exc
+
+    segments = []
+    for node in root:
+        raw_text = node.text or ""
+        text = normalize_caption_text(raw_text)
+        if not text:
+            continue
+        segments.append(
+            CaptionSegment(
+                start=float(node.attrib.get("start", "0") or 0),
+                duration=float(node.attrib.get("dur", "0") or 0),
+                text=text,
+            )
+        )
+
+    if not segments:
+        raise SubtitleError("The selected subtitle track is empty.")
+    return segments
+
+
 def resolve_transcript(video_id: str, track_id: str) -> Transcript:
     language_code, is_generated = parse_track_id(track_id)
-    for transcript in transcript_api().list(video_id):
+    transcript_list = transcript_api().list(video_id)
+    for transcript in transcript_list:
         if transcript.language_code == language_code and transcript.is_generated == is_generated:
+            store_track_url(video_id, track_id, transcript._url)
             return transcript
     raise SubtitleError("The selected subtitle track is no longer available.")
 
@@ -206,6 +301,11 @@ def resolve_transcript(video_id: str, track_id: str) -> Transcript:
 def fetch_caption_segments(
     video_id: str, track_id: str, target_language: str | None = None
 ) -> list[CaptionSegment]:
+    cache_key = (video_id, track_id, target_language or "")
+    cached_segments = cache_get(SEGMENT_CACHE, cache_key)
+    if cached_segments is not None:
+        return cached_segments
+
     try:
         transcript = resolve_transcript(video_id, track_id)
         if target_language and target_language != transcript.language_code:
@@ -218,9 +318,11 @@ def fetch_caption_segments(
     except TranslationLanguageNotAvailable:
         raise SubtitleError("That target language is not available for this subtitle track.")
     except (IpBlocked, RequestBlocked):
-        raise SubtitleError(
-            "YouTube blocked transcript requests from this machine. Try again later or from another network."
-        )
+        cached_url = cache_get(TRACK_URL_CACHE, (video_id, track_id))
+        if cached_url:
+            segments = fetch_segments_from_cached_url(cached_url, target_language)
+            return cache_set(SEGMENT_CACHE, cache_key, segments, SEGMENT_CACHE_TTL)
+        raise SubtitleError(RATE_LIMIT_MESSAGE)
     except PoTokenRequired:
         raise SubtitleError("YouTube requires an additional access token for this transcript right now.")
 
@@ -235,15 +337,30 @@ def fetch_caption_segments(
     ]
     if not segments:
         raise SubtitleError("The selected subtitle track is empty.")
-    return segments
+    return cache_set(SEGMENT_CACHE, cache_key, segments, SEGMENT_CACHE_TTL)
 
 
 def analyze_video(video_url: str) -> dict[str, Any]:
     video_id = extract_video_id(video_url)
-    html = fetch_text(f"{YOUTUBE_WATCH_URL}?v={video_id}&hl=en")
-    player_response = extract_player_response(html)
-    transcript_list = transcript_api().list(video_id)
-    video_details = player_response.get("videoDetails", {})
+    cached_analysis = cache_get(ANALYSIS_CACHE, video_id)
+    if cached_analysis is not None:
+        return cached_analysis
+
+    try:
+        transcript_list = transcript_api().list(video_id)
+    except (IpBlocked, RequestBlocked):
+        raise SubtitleError(RATE_LIMIT_MESSAGE)
+    except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable):
+        raise SubtitleError("This video does not expose accessible subtitle tracks.")
+
+    try:
+        html = fetch_text(f"{YOUTUBE_WATCH_URL}?v={video_id}&hl=en")
+        player_response = extract_player_response(html)
+        video_details = player_response.get("videoDetails", {})
+        metadata_notice = None
+    except SubtitleError:
+        video_details = fallback_video_details(video_id)
+        metadata_notice = "Loaded subtitles without full video metadata because YouTube limited the page request."
 
     tracks = []
     translation_index: dict[str, str] = {}
@@ -258,11 +375,13 @@ def analyze_video(video_url: str) -> dict[str, Any]:
             }
             for language in transcript.translation_languages
         ]
+        track_id = build_track_id(transcript.language_code, transcript.is_generated)
+        store_track_url(video_id, track_id, transcript._url)
         for language in translation_languages:
             translation_index[language["language_code"]] = language["language_name"]
         tracks.append(
             {
-                "track_id": build_track_id(transcript.language_code, transcript.is_generated),
+                "track_id": track_id,
                 "language_code": transcript.language_code,
                 "language_name": transcript.language,
                 "kind": "asr" if transcript.is_generated else "standard",
@@ -275,7 +394,7 @@ def analyze_video(video_url: str) -> dict[str, Any]:
     if not found_track:
         raise SubtitleError("No subtitle tracks were found for this video.")
 
-    return {
+    analysis = {
         "video_id": video_id,
         "title": video_details.get("title", "Untitled video"),
         "author": video_details.get("author", "Unknown channel"),
@@ -286,7 +405,9 @@ def analyze_video(video_url: str) -> dict[str, Any]:
             {"language_code": code, "language_name": name}
             for code, name in sorted(translation_index.items(), key=lambda item: item[1].lower())
         ],
+        "metadata_notice": metadata_notice,
     }
+    return cache_set(ANALYSIS_CACHE, video_id, analysis, ANALYSIS_CACHE_TTL)
 
 
 def safe_filename(value: str) -> str:

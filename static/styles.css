@@ -255,6 +255,26 @@ button.secondary,
   line-height: 1.5;
 }
 
+.notice {
+  margin-top: 1rem;
+  padding: 0.95rem 1rem;
+  border-radius: 16px;
+  border: 1px solid rgba(66, 37, 18, 0.1);
+  line-height: 1.55;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
+}
+
+.notice.info {
+  background: rgba(189, 75, 21, 0.08);
+  color: var(--accent-strong);
+}
+
+.notice.warning {
+  background: rgba(143, 46, 36, 0.08);
+  color: var(--danger);
+}
+
 .status.success {
   color: var(--success);
 }
